@@ -197,7 +197,7 @@ The intended attack path was **RDP breach, then pivot to the local MySQL data**,
 
 ## Phase 6: Detect and investigate the breach
 
-With the VM online, I watched Sentinel/Defender for incidents from the two rules and used the rule queries as helper queries against `DeviceLogonEvents` and `MySQLAudit_CL`. Once attacker activity appeared, I pivoted into the endpoint tables and ran these hunts in Defender Advanced Hunting against the `LAW-Cyber-Range` workspace. The full queries are in [`hunts/`](hunts/).
+With the VM online, I watched Sentinel/Defender for incidents from the two rules and used the rule queries as helper queries against `DeviceLogonEvents` and `MySQLAudit_CL`. Once attacker activity appeared, I pivoted into the endpoint tables and ran these hunts in Defender Advanced Hunting against the `LAW-Cyber-Range` workspace. 
 
 ### Hunt 1: RDP brute force and successful administrator logons
 
