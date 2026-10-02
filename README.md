@@ -383,4 +383,4 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 └── hunts/         investigation queries (.kql)
 ```
 
-The full write-up is in [`report/`](report/).
+The full write-up is in [`reports/`](reports/).
