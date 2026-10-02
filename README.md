@@ -95,7 +95,7 @@ After the DCR was created, the **AzureMonitorWindowsAgent** extension installed 
 ```kql
 MySQLAudit_CL
 | project TimeGenerated, RawData, _ResourceId
-| where _ResourceId endswith "<your-vm-name>"
+| where _ResourceId endswith "corp-ae1-872d"
 ```
 
 I also confirmed that the core `Device*` tables were populating from MDE before moving on.
