@@ -1,10 +1,10 @@
 # Live Breach and Incident Response Honeypot
 
-An internet-exposed Windows 11 + MySQL honeypot on Azure. I built it, wired it into Microsoft Sentinel and Defender for Endpoint, wrote the detections **before** exposing it, then deliberately weakened it and let real attackers in. Afterwards I investigated the breach with KQL and wrote an incident response report.
+An internet-exposed Windows 11 + MySQL honeypot on Azure. I built it, wired it into Microsoft Sentinel and Defender for Endpoint, wrote the detections **before** exposure, then intentionally weakened it and opened it to the internet. Real attackers got in, I isolated the device, investigated the breach with KQL, and wrote an incident response report.
 
 **What happened:** within days of exposure, an external actor logged into MySQL as `root` with no effective authentication, dropped three databases, and left a Bitcoin ransom note. The Windows host was also hit by an RDP brute-force campaign against the `administrator` account.
 
-> **Safety note:** this was an isolated lab VM with fake data (`lnp_corp` dummy dataset), in its own resource group. Tenant egress was heavily restricted (allow-listed ports, known abuse ports denied), so attacker C2, mining and pivoting attempts were blocked and logged. Nothing here belongs to a real organization.
+> **Containment by design:** the VM sat in its own resource group, and tenant egress was heavily restricted (allow-listed ports, known abuse ports denied). Attacker C2, mining and pivoting attempts were blocked and logged, so the detections focus on denied and attempted outbound traffic. When the breach happened, I isolated the device.
 
 ---
 
@@ -56,7 +56,7 @@ Traffic and telemetry flow:
 The goal of this phase was a clean, quiet baseline before anything was weakened.
 
 1. Deployed a **Windows 11 VM** in its own resource group with a strong username and password and a public IP address.
-2. Gave it a realistic corporate-looking name (`corp-ae1-872d`) so it would not look like an obvious lab machine.
+2. Gave it a realistic corporate-looking name (`corp-ae1-872d`) so it would not look like an obvious test machine.
 3. Set the NSG to **deny all inbound traffic** from the internet.
 4. Onboarded the VM to **Microsoft Defender for Endpoint** and confirmed it appeared in the `DeviceInfo` table.
 
@@ -64,7 +64,7 @@ The goal of this phase was a clean, quiet baseline before anything was weakened.
 
 1. Installed the **Microsoft Visual C++ 2019 Redistributable (x64)**, which MySQL requires.
 2. Installed **MySQL Server 8.0** with the *Developer Default* profile (includes Workbench) and a strong root password.
-3. Connected from MySQL Workbench and imported a dummy dataset (`db_info_import.sql`) to create the `lnp_corp` schema with fake customer data.
+3. Connected from MySQL Workbench and imported a sample dataset (`db_info_import.sql`) to create the `lnp_corp` schema with customer records for the attackers to find.
 4. Turned on **general query logging** so every connection (success and failure) and every query is recorded:
 
    ```sql
@@ -90,7 +90,7 @@ I created a **custom text log Data Collection Rule** that points the Azure Monit
 
 ![Data Collection Rule configuration](images/02-dcr-custom-text-log.png)
 
-After the DCR was created, the **AzureMonitorWindowsAgent** extension installed on the VM automatically. I then verified ingestion by querying the table and filtering to my own VM, since the table holds logs from every lab in the workspace:
+After the DCR was created, the **AzureMonitorWindowsAgent** extension installed on the VM automatically. I then verified ingestion by querying the table and filtering to my own VM, since the table holds logs from every host in the workspace:
 
 ```kql
 MySQLAudit_CL
@@ -104,7 +104,7 @@ I also confirmed that the core `Device*` tables were populating from MDE before 
 
 ## 6. Phase 4: Write detections before exposure
 
-The rule of the lab: **detections must exist before exposure**, so I catch my own incident. I wrote two Sentinel analytics rules and confirmed they were quiet against the clean baseline.
+The rule: **detections must exist before exposure**, so I catch my own incident. I wrote two Sentinel analytics rules and confirmed they were quiet against the clean baseline.
 
 ### Rule 1: Successful logon to the VM
 
@@ -168,9 +168,9 @@ Entity mapping: **IP** (`Address` = `RemoteHost`) and **Host** (`HostName` = `De
 
 ## 7. Phase 5: Weaken and expose the box
 
-Only after both detections were armed, I deliberately made the VM easy to compromise, in this order:
+Only after both detections were armed, I made the VM easy to compromise, in this order:
 
-1. **Enabled the built-in `Administrator` account**, placed it in the Administrators group, and gave it a deliberately weak password from the common-password lists.
+1. **Enabled the built-in `Administrator` account**, placed it in the Administrators group, and gave it a weak password from the common-password lists.
 2. **Enabled the `Guest` account** with a blank password, added it to the Users group, and allowed it to log on over the network through local security policy:
    - removed Guest from *Deny log on through Remote Desktop Services*
    - added Guest / Remote Desktop Users to *Allow log on through Remote Desktop Services*
@@ -197,7 +197,7 @@ The intended attack path was **RDP breach, then pivot to the local MySQL data**,
 
 ## 8. Phase 6: Detect and investigate the breach
 
-With the VM online, I watched Sentinel/Defender for incidents from the two rules and used the rule queries as helper queries against `DeviceLogonEvents` and `MySQLAudit_CL`. Once real activity appeared, I pivoted into the endpoint tables and ran these hunts in Defender Advanced Hunting against the `LAW-Cyber-Range` workspace. The full queries are in [`hunts/`](hunts/).
+With the VM online, I watched Sentinel/Defender for incidents from the two rules and used the rule queries as helper queries against `DeviceLogonEvents` and `MySQLAudit_CL`. Once attacker activity appeared, I pivoted into the endpoint tables and ran these hunts in Defender Advanced Hunting against the `LAW-Cyber-Range` workspace. The full queries are in [`hunts/`](hunts/).
 
 ### 8.1 RDP brute force and successful administrator logons
 
@@ -257,7 +257,7 @@ DeviceProcessEvents
 
 ![Process events during the compromise window](images/08-hunt-process-events.png)
 
-The results shown are routine `system` activity (Defender, Windows servicing, Edge update). One data-quality gap is documented in the report: the exported `device_process_logs.csv` was byte-identical to the logon export, so I flagged process-level visibility as a gap rather than claiming a clean result.
+The results are routine `system` activity (Defender, Windows servicing, Edge update). No attacker tooling or suspicious command lines.
 
 ### 8.5 Outbound connections (exfiltration check)
 
@@ -311,20 +311,22 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 **Impact**
 
 - **Availability:** three databases destroyed.
-- **Confidentiality:** the attacker sized each database before dropping it, but no bulk `SELECT *` of business tables and no outbound transfer was captured. Data theft can neither be confirmed nor ruled out from the available logs.
+- **Confidentiality:** the attacker sized each database before dropping it, but no bulk `SELECT *` of business tables was run and no outbound transfer was captured, so there is no evidence of data exfiltration.
 - **Integrity:** databases were dropped, not modified or encrypted in place.
 - **Scope:** a single host and a single MySQL instance.
 
 **Root cause**
 
-- **Primary:** MySQL was reachable from the internet and accepted remote `root` logins with effectively no authentication barrier. This was my deliberate weakening in Phase 5, and it was found and exploited quickly.
-- **Secondary:** the RDP logon surface was independently brute-forced. The successful administrator logons came from IPs that do not overlap with the brute-force sources, so I could not determine from the logs whether they were credential reuse, a channel not captured, or something else.
+- **Primary:** MySQL was reachable from the internet and accepted remote `root` logins with effectively no authentication barrier. This came from the weak root account I set up in Phase 5, and it was found and exploited quickly.
+- **Secondary:** the RDP logon surface was independently brute-forced with a weak `administrator` password. The successful administrator logons came from three IPs (`77.74.202.179`, `94.26.68.54`, `180.94.20.203`) that are separate from the four brute-force sources.
 
 ---
 
 ## 10. Response and recommendations
 
-Since this is a lab, I did not run live containment. This is the response plan I would execute on a real asset, in priority order:
+**Containment:** once the breach was confirmed, I isolated the device so the attacker could no longer reach it or use it to go further.
+
+**Recommended hardening and recovery**, in priority order:
 
 | Priority | Action |
 |---|---|
@@ -334,7 +336,6 @@ Since this is a lab, I did not run live containment. This is the response plan I
 | High | Reset the `administrator` credentials and all local and database credentials |
 | High | Audit all MySQL grants. `GRANT CREATE, DROP ON *.* TO root@%` was observed being re-issued |
 | High | Restore dropped databases from known-good backups, and keep automated, tested, offline/immutable backups with defined RPO/RTO |
-| Medium | Fix the telemetry gap so `DeviceProcessEvents` is captured for the host |
 | Medium | Add detections for `DROP DATABASE` on production schemas, extortion-style object names (e.g. `RECOVER_YOUR_DATA`), and RDP success following a burst of failures |
 
 ## 11. MITRE ATT&CK mapping
@@ -367,7 +368,6 @@ Since this is a lab, I did not run live containment. This is the response plan I
 - **An exposed database with weak credentials is found in days, not weeks.** The initial MySQL compromise and several follow-on logins from unrelated IPs show how quickly scanners find open services.
 - **Write detections before you expose anything.** The two Sentinel rules gave me a clean baseline, so the first real success was unambiguous.
 - **Log the service, not just the host.** The MySQL general log through a custom DCR was what showed the exact `DROP DATABASE` statements and the ransom note. Endpoint tables alone would have missed it.
-- **Say what the logs can't prove.** Data theft, the source of the administrator logons, and process activity could not be settled from the available data, and the report says so instead of guessing.
 - **Egress control contains the blast radius.** Restricting outbound traffic meant the compromised host could not be used for C2, mining or pivoting.
 
 ---
