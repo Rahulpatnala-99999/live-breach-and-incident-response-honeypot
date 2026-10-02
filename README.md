@@ -10,23 +10,23 @@ An internet-exposed Windows 11 + MySQL honeypot on Azure. I built it, wired it i
 
 ## Table of contents
 
-1. [Architecture](#1-architecture)
-2. [Tools used](#2-tools-used)
-3. [Phase 1: Build the VM (locked down)](#3-phase-1-build-the-vm-locked-down)
-4. [Phase 2: Install and populate MySQL](#4-phase-2-install-and-populate-mysql)
-5. [Phase 3: Send logs to Log Analytics](#5-phase-3-send-logs-to-log-analytics)
-6. [Phase 4: Write detections before exposure](#6-phase-4-write-detections-before-exposure)
-7. [Phase 5: Weaken and expose the box](#7-phase-5-weaken-and-expose-the-box)
-8. [Phase 6: Detect and investigate the breach](#8-phase-6-detect-and-investigate-the-breach)
-9. [What the attackers did](#9-what-the-attackers-did)
-10. [Response and recommendations](#10-response-and-recommendations)
-11. [MITRE ATT&CK mapping](#11-mitre-attck-mapping)
-12. [Indicators of compromise](#12-indicators-of-compromise)
-13. [Lessons learned](#13-lessons-learned)
+- [Architecture](#architecture)
+- [Tools used](#tools-used)
+- [Phase 1: Build the VM (locked down)](#phase-1-build-the-vm-locked-down)
+- [Phase 2: Install and populate MySQL](#phase-2-install-and-populate-mysql)
+- [Phase 3: Send logs to Log Analytics](#phase-3-send-logs-to-log-analytics)
+- [Phase 4: Write detections before exposure](#phase-4-write-detections-before-exposure)
+- [Phase 5: Weaken and expose the box](#phase-5-weaken-and-expose-the-box)
+- [Phase 6: Detect and investigate the breach](#phase-6-detect-and-investigate-the-breach)
+- [What the attackers did](#what-the-attackers-did)
+- [Response and recommendations](#response-and-recommendations)
+- [MITRE ATT&CK mapping](#mitre-attck-mapping)
+- [Indicators of compromise](#indicators-of-compromise)
+- [Lessons learned](#lessons-learned)
 
 ---
 
-## 1. Architecture
+## Architecture
 
 ![Honeypot architecture](images/01-architecture.png)
 
@@ -37,7 +37,7 @@ Traffic and telemetry flow:
 - **Endpoint telemetry:** Microsoft Defender for Endpoint (MDE) sends device logon, process, file, registry and network events to the same workspace.
 - **Egress control:** outbound traffic is restricted centrally, so a compromised box is contained by design.
 
-## 2. Tools used
+## Tools used
 
 | Area | Tool |
 |---|---|
@@ -51,7 +51,7 @@ Traffic and telemetry flow:
 
 ---
 
-## 3. Phase 1: Build the VM (locked down)
+## Phase 1: Build the VM (locked down)
 
 The goal of this phase was a clean, quiet baseline before anything was weakened.
 
@@ -60,7 +60,7 @@ The goal of this phase was a clean, quiet baseline before anything was weakened.
 3. Set the NSG to **deny all inbound traffic** from the internet.
 4. Onboarded the VM to **Microsoft Defender for Endpoint** and confirmed it appeared in the `DeviceInfo` table.
 
-## 4. Phase 2: Install and populate MySQL
+## Phase 2: Install and populate MySQL
 
 1. Installed the **Microsoft Visual C++ 2019 Redistributable (x64)**, which MySQL requires.
 2. Installed **MySQL Server 8.0** with the *Developer Default* profile (includes Workbench) and a strong root password.
@@ -76,7 +76,7 @@ The goal of this phase was a clean, quiet baseline before anything was weakened.
 5. Replaced `my.ini` so MySQL logs to `C:\ProgramData\MySQL\MySQL Server 8.0\Data\mysql_general.log` and accepts connections over the network, then restarted the `MySQL80` service.
 6. Ran a few `SELECT` queries and confirmed they showed up in the log file.
 
-## 5. Phase 3: Send logs to Log Analytics
+## Phase 3: Send logs to Log Analytics
 
 I created a **custom text log Data Collection Rule** that points the Azure Monitor Agent at the MySQL log file and lands it in a custom table.
 
@@ -102,7 +102,7 @@ I also confirmed that the core `Device*` tables were populating from MDE before 
 
 ---
 
-## 6. Phase 4: Write detections before exposure
+## Phase 4: Write detections before exposure
 
 The rule: **detections must exist before exposure**, so I catch my own incident. I wrote two Sentinel analytics rules and confirmed they were quiet against the clean baseline.
 
@@ -112,7 +112,7 @@ Alerts on a successful `administrator` or `guest` logon. These accounts did not 
 
 ```kql
 // Virtual Machine Logons
-let MyDevice = "<your-device-name>"; // MDE truncates long device names
+let MyDevice = "corp-ae1-872d"; // MDE truncates long device names
 DeviceLogonEvents
 | where DeviceName == MyDevice
 | where AccountName in~ ("administrator", "guest")
@@ -130,7 +130,7 @@ Entity mapping: **Host** (`HostName` = `DeviceName`) and **IP** (`Address` = `Re
 
 ```kql
 // MySQL: failed login -> successful login detection
-let MyDevice = "<your-device-name>";
+let MyDevice = "corp-ae1-872d";
 let MyTimeframe = ago(7d);
 let FailedConnections =
     MySQLAudit_CL
@@ -166,7 +166,7 @@ Entity mapping: **IP** (`Address` = `RemoteHost`) and **Host** (`HostName` = `De
 
 ---
 
-## 7. Phase 5: Weaken and expose the box
+## Phase 5: Weaken and expose the box
 
 Only after both detections were armed, I made the VM easy to compromise, in this order:
 
@@ -188,18 +188,18 @@ Only after both detections were armed, I made the VM easy to compromise, in this
 4. **Captured a Defender Investigation Package** from the VM, to use later in post-breach analysis.
 5. **Disabled the Windows Firewall.**
 6. **Opened the NSG to allow all inbound traffic**, which increases discoverability.
-7. **Recorded the exposure timestamp:** `<YYYY-MM-DDTHH:MM:SSZ>` (start of the incident window).
+7. **Recorded the exact exposure timestamp**, which marks the start of the incident window.
 8. Confirmed both analytics rules were enabled, then left the VM running. It shut down every night at midnight Eastern for cost control and was restarted each morning.
 
 The intended attack path was **RDP breach, then pivot to the local MySQL data**, with port 3306 also exposed directly so the database would be touched during the observation window.
 
 ---
 
-## 8. Phase 6: Detect and investigate the breach
+## Phase 6: Detect and investigate the breach
 
 With the VM online, I watched Sentinel/Defender for incidents from the two rules and used the rule queries as helper queries against `DeviceLogonEvents` and `MySQLAudit_CL`. Once attacker activity appeared, I pivoted into the endpoint tables and ran these hunts in Defender Advanced Hunting against the `LAW-Cyber-Range` workspace. The full queries are in [`hunts/`](hunts/).
 
-### 8.1 RDP brute force and successful administrator logons
+### Hunt 1: RDP brute force and successful administrator logons
 
 ```kql
 DeviceLogonEvents
@@ -214,7 +214,7 @@ DeviceLogonEvents
 
 Failed logons from several external IPs, followed by successful `administrator` logons from other IPs.
 
-### 8.2 MySQL authentication by source IP
+### Hunt 2: MySQL authentication by source IP
 
 ```kql
 MySQLAudit_CL
@@ -233,7 +233,7 @@ MySQLAudit_CL
 
 One IP (`77.90.185.30`) generated hundreds of attempts against `root`, `sa` and `admin`, and many unrelated IPs logged in successfully as `root`.
 
-### 8.3 Database drop and ransom note
+### Hunt 3: Database drop and ransom note
 
 ```kql
 MySQLAudit_CL
@@ -245,7 +245,7 @@ MySQLAudit_CL
 
 ![DROP DATABASE and ransom note queries](images/07-hunt-mysql-drop-ransom.png)
 
-### 8.4 Did the attacker run anything on the host?
+### Hunt 4: Did the attacker run anything on the host?
 
 ```kql
 DeviceProcessEvents
@@ -259,7 +259,7 @@ DeviceProcessEvents
 
 The results are routine `system` activity (Defender, Windows servicing, Edge update). No attacker tooling or suspicious command lines.
 
-### 8.5 Outbound connections (exfiltration check)
+### Hunt 5: Outbound connections (exfiltration check)
 
 ```kql
 DeviceNetworkEvents
@@ -275,7 +275,7 @@ DeviceNetworkEvents
 
 Outbound traffic was normal Microsoft and Edge/OneDrive traffic. No bulk transfer to attacker infrastructure was seen.
 
-### 8.6 Persistence check
+### Hunt 6: Persistence check
 
 ```kql
 DeviceRegistryEvents
@@ -291,7 +291,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 
 ---
 
-## 9. What the attackers did
+## What the attackers did
 
 **Summary:** a database-layer "empty-shell" ransom (drop databases, leave a note), not file-encrypting ransomware. No malware, staging or lateral movement was found on the endpoint.
 
@@ -322,7 +322,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 
 ---
 
-## 10. Response and recommendations
+## Response and recommendations
 
 **Containment:** once the breach was confirmed, I isolated the device so the attacker could no longer reach it or use it to go further.
 
@@ -338,7 +338,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 | High | Restore dropped databases from known-good backups, and keep automated, tested, offline/immutable backups with defined RPO/RTO |
 | Medium | Add detections for `DROP DATABASE` on production schemas, extortion-style object names (e.g. `RECOVER_YOUR_DATA`), and RDP success following a burst of failures |
 
-## 11. MITRE ATT&CK mapping
+## MITRE ATT&CK mapping
 
 | Tactic | Technique |
 |---|---|
@@ -349,7 +349,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 | Impact | T1485, Data Destruction (`DROP DATABASE`) |
 | Impact | T1657, Financial Theft (extortion note demanding Bitcoin) |
 
-## 12. Indicators of compromise
+## Indicators of compromise
 
 | Type | Value |
 |---|---|
@@ -363,7 +363,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 | Ransom DATAID | `2ALF4` |
 | Attacker-created object | Database/table `RECOVER_YOUR_DATA` |
 
-## 13. Lessons learned
+## Lessons learned
 
 - **An exposed database with weak credentials is found in days, not weeks.** The initial MySQL compromise and several follow-on logins from unrelated IPs show how quickly scanners find open services.
 - **Write detections before you expose anything.** The two Sentinel rules gave me a clean baseline, so the first real success was unambiguous.
@@ -378,7 +378,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 .
 ├── README.md
 ├── images/        screenshots used above
-├── report/        full incident report
+├── reports/       incident report and setup report
 ├── detections/    Sentinel analytics rule queries (.kql)
 └── hunts/         investigation queries (.kql)
 ```
