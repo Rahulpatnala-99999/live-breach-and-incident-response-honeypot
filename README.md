@@ -379,8 +379,6 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 ├── README.md
 ├── images/        screenshots used above
 ├── reports/       incident report and setup report
-├── detections/    Sentinel analytics rule queries (.kql)
-└── hunts/         investigation queries (.kql)
 ```
 
 The full write-up is in [`reports/`](reports/).
