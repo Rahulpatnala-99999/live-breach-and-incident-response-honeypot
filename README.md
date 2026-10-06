@@ -2,7 +2,7 @@
 
 An internet-exposed Windows 11 + MySQL honeypot on Azure. I built it, wired it into Microsoft Sentinel and Defender for Endpoint, wrote the detections **before** exposure, then intentionally weakened it and opened it to the internet. Real attackers got in, I isolated the device, investigated the breach with KQL, and wrote an incident response report.
 
-**What happened:** within days of exposure, an external actor logged into MySQL as `root` with no effective authentication, dropped three databases, and left a Bitcoin ransom note. The Windows host was also hit by an RDP brute-force campaign against the `administrator` account.
+**What happened:** within days of exposure, an external actor logged into MySQL as `root` using the trivially guessable password `root`, dropped three databases, and left a Bitcoin ransom note. The Windows host was also hit by an RDP brute-force campaign against the `administrator` account.
 
 > **Containment by design:** the VM sat in its own resource group, and tenant egress was heavily restricted (allow-listed ports, known abuse ports denied). Attacker C2, mining and pivoting attempts were blocked and logged, so the detections focus on denied and attempted outbound traffic. When the breach happened, I isolated the device.
 
@@ -58,7 +58,13 @@ The goal of this phase was a clean, quiet baseline before anything was weakened.
 1. Deployed a **Windows 11 VM** in its own resource group with a strong username and password and a public IP address.
 2. Gave it a realistic corporate-looking name (`corp-ae1-872d`) so it would not look like an obvious test machine.
 3. Set the NSG to **deny all inbound traffic** from the internet.
-4. Onboarded the VM to **Microsoft Defender for Endpoint** and confirmed it appeared in the `DeviceInfo` table.
+4. Onboarded the VM to **Microsoft Defender for Endpoint** and confirmed it appeared in the `DeviceInfo` table. MDE truncates long device names, so I used a short match:
+
+   ```kql
+   DeviceInfo
+   | where DeviceName startswith "corp-ae1"
+   | project TimeGenerated, DeviceName, OSPlatform, PublicIP
+   ```
 
 ## Phase 2: Install and populate MySQL
 
@@ -75,6 +81,7 @@ The goal of this phase was a clean, quiet baseline before anything was weakened.
 
 5. Replaced `my.ini` so MySQL logs to `C:\ProgramData\MySQL\MySQL Server 8.0\Data\mysql_general.log` and accepts connections over the network, then restarted the `MySQL80` service.
 6. Ran a few `SELECT` queries and confirmed they showed up in the log file.
+7. Took a **full backup of all databases** on the server, so the original data could be restored later.
 
 ## Phase 3: Send logs to Log Analytics
 
@@ -185,9 +192,11 @@ Only after both detections were armed, I made the VM easy to compromise, in this
    FLUSH PRIVILEGES;
    ```
 
-4. **Captured a Defender Investigation Package** from the VM, to use later in post-breach analysis.
+   This creates a separate `root` account that can log in from anywhere with the password `root`. The original local `root` account (strong password from Phase 2) still exists.
+
+4. Before touching the network, **captured a Defender Investigation Package** from the VM: a snapshot of the clean state to compare against later.
 5. **Disabled the Windows Firewall.**
-6. **Opened the NSG to allow all inbound traffic**, which increases discoverability.
+6. **Opened the NSG to allow all inbound traffic**, so RDP (3389) and MySQL (3306) were reachable from anywhere.
 7. **Recorded the exact exposure timestamp**, which marks the start of the incident window.
 8. Confirmed both analytics rules were enabled, then left the VM running. It shut down every night at midnight Eastern for cost control and was restarted each morning.
 
@@ -231,7 +240,7 @@ MySQLAudit_CL
 
 ![MySQL authentication by source IP](images/06-hunt-mysql-auth-by-ip.png)
 
-One IP (`77.90.185.30`) generated hundreds of attempts against `root`, `sa` and `admin`, and many unrelated IPs logged in successfully as `root`.
+One IP (`77.90.185.30`) generated 135+ failed attempts against `root`, `sa` and `admin`, and many unrelated IPs logged in successfully as `root`.
 
 ### Hunt 3: Database drop and ransom note
 
@@ -295,8 +304,11 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 
 **Summary:** a database-layer "empty-shell" ransom (drop databases, leave a note), not file-encrypting ransomware. No malware, staging or lateral movement was found on the endpoint.
 
+Observation window in the data: **Aug 15, 2026 16:14 UTC to Aug 19, 2026 00:38 UTC**. All times are as logged.
+
 | Time (UTC) | Event |
 |---|---|
+| Aug 15, 2026 16:14 to 16:18 | Baseline host telemetry begins (Defender sensor activity, no anomalies) |
 | Aug 16, 2026 03:07:47 | Attacker (`64.89.163.139`) runs `SHOW DATABASES` and size-recon queries against `information_schema.tables` as `root` |
 | Aug 16, 03:07:51 | First successful `root` login to MySQL |
 | Aug 16, 03:07:48 to 03:08:22 | `RECOVER_YOUR_DATA` database and table created, ransom note inserted (0.0134 BTC demanded) |
@@ -307,17 +319,24 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 | Aug 18, 04:22 and 10:10 | Successful `administrator` network logons from `94.26.68.54` and `180.94.20.203` |
 | Aug 18, 20:09 to 20:10 | Successful `administrator` network and interactive (RDP) logon from `77.74.202.179` |
 | Aug 18, 20:10 to 23:37 | Interactive session: Edge browsing and standard OneDrive/Office telemetry, with no malicious tooling observed |
+| Aug 19, 00:35 to 00:38 | Last recorded host activity (Defender data-collection artifacts) |
+
+| Field | Value |
+|---|---|
+| Classification | Database extortion (MySQL ransom / data destruction), compounded by exposed RDP with a brute-forced `administrator` account |
+| Severity | High: databases destroyed, admin-level account compromised on an internet-facing host |
+| Affected assets | `corp-ae1-872d` (single Windows host running MySQL); databases `cr_corp_01`, `sakila`, `world`, and the attacker-created `recover_your_data` |
 
 **Impact**
 
-- **Availability:** three databases destroyed.
+- **Availability:** three databases destroyed. `cr_corp_01` follows corporate naming and is the highest-value loss, so it is first in line for restoration.
 - **Confidentiality:** the attacker sized each database before dropping it, but no bulk `SELECT *` of business tables was run and no outbound transfer was captured, so there is no evidence of data exfiltration.
 - **Integrity:** databases were dropped, not modified or encrypted in place.
-- **Scope:** a single host and a single MySQL instance.
+- **Scope:** a single host and a single MySQL instance. No lateral movement was seen in registry, file or process artifacts.
 
 **Root cause**
 
-- **Primary:** MySQL was reachable from the internet and accepted remote `root` logins with effectively no authentication barrier. This came from the weak root account I set up in Phase 5, and it was found and exploited quickly.
+- **Primary:** MySQL was reachable from the internet and accepted remote `root` logins with the default-style password `root`. This came from the weak root account I set up in Phase 5, and it was found and exploited quickly.
 - **Secondary:** the RDP logon surface was independently brute-forced with a weak `administrator` password. The successful administrator logons came from three IPs (`77.74.202.179`, `94.26.68.54`, `180.94.20.203`) that are separate from the four brute-force sources.
 
 ---
@@ -336,16 +355,17 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 | High | Reset the `administrator` credentials and all local and database credentials |
 | High | Audit all MySQL grants. `GRANT CREATE, DROP ON *.* TO root@%` was observed being re-issued |
 | High | Restore dropped databases from known-good backups, and keep automated, tested, offline/immutable backups with defined RPO/RTO |
+| Medium | Retain process-level telemetry (`DeviceProcessEvents`) with a longer lookback for every internet-facing host |
+| Medium | Review `cr_corp_01` and the other dropped databases against breach-notification requirements |
 | Medium | Add detections for `DROP DATABASE` on production schemas, extortion-style object names (e.g. `RECOVER_YOUR_DATA`), and RDP success following a burst of failures |
 
 ## MITRE ATT&CK mapping
 
 | Tactic | Technique |
 |---|---|
-| Initial Access | T1190, Exploit Public-Facing Application (exposed MySQL with weak `root`) |
 | Credential Access | T1110, Brute Force (RDP against `administrator`, MySQL against `root`/`sa`/`admin`) |
-| Initial Access / Persistence | T1078, Valid Accounts (successful `administrator` and `root` logons) |
-| Lateral Movement | T1021.001, Remote Services: Remote Desktop Protocol |
+| Initial Access / Persistence | T1078, Valid Accounts (successful `administrator` and `root` logons on the exposed MySQL and RDP services) |
+| Initial Access / Persistence | T1133, External Remote Services (internet-facing RDP) |
 | Impact | T1485, Data Destruction (`DROP DATABASE`) |
 | Impact | T1657, Financial Theft (extortion note demanding Bitcoin) |
 
@@ -378,7 +398,7 @@ No malicious Run-key or service persistence was found. Only standard Windows and
 .
 ├── README.md
 ├── images/        screenshots used above
-├── reports/       incident report and setup report
+└── reports/       incident report and setup report
 ```
 
 The full write-up is in [`reports/`](reports/).
